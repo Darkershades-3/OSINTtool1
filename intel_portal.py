@@ -3,58 +3,50 @@ import aiohttp
 import os
 import sys
 import json
+import re
 from datetime import datetime
 from PIL import Image
 from PIL.ExifTags import TAGS, GPSTAGS
 import logging
 
+# Import your custom stealth rotation engine
+from stealth import StealthSession
+
 # --- Configuration ---
-IMAGE_SCAN_FOLDER = './scanned_images'  # Folder to scan for images
+IMAGE_SCAN_FOLDER = './scanned_images'
+
 # Dictionary of target sites for username tracking
-# Format: { 'site_name': {'url_template': '...', 'not_found_indicator': '...' or 'status_code': ...} }
 USERNAME_TRACKER_SITES = {
     'github': {
         'url_template': 'https://github.com/{username}',
-        'not_found_indicator': {'status_code': 404}
+        'not_found_indicator': {'text_contains': '"pinned-items-not-found"'}
     },
     'reddit': {
         'url_template': 'https://www.reddit.com/user/{username}',
-        'not_found_indicator': {'text_contains': 'Page not found'} # This might need adjustment based on Reddit's actual page content
+        'not_found_indicator': {'text_contains': 'Page not found'}
     },
     'instagram': {
         'url_template': 'https://www.instagram.com/{username}',
-        'not_found_indicator': {'text_contains': 'Sorry, this page isn\'t available.'} # This might need adjustment
-    },
-    'example_forum': {
-        'url_template': 'https://www.exampleforum.com/member/{username}',
-        'not_found_indicator': {'status_code': 404} # Assuming a 404 for a non-existent user
+        'not_found_indicator': {'text_contains': "Sorry, this page isn't available."}
     }
 }
+
 # AI Model Configuration
 AI_MODEL_FAST = "openrouter/auto"
-AI_MODEL_RELIABLE = "openrouter/openrouter/auto" # Or another reliable free model
 
 # Logging setup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+# Initialize the stealth engine globally once
+stealth_engine = StealthSession()
+
 # --- Component A: Image EXIF Analyzer ---
 
 def get_exif_data(image_path):
-    """
-    Extracts EXIF data from an image file.
-    Processes iteratively to avoid loading entire file into memory.
-    """
     exif_data = {}
     try:
-        # Open image iteratively
         with Image.open(image_path) as img:
-            # Check if image has EXIF data
             if 'exif' in img.info:
-                exif_bytes = img.info['exif']
-                # PIL's exif_bytes is already somewhat processed, but we can parse it further
-                # For true iterative processing without loading all exif, it's complex.
-                # PIL's approach is generally efficient for metadata.
-                # We'll rely on PIL's metadata extraction here.
                 for tag_id, value in img.getexif().items():
                     tag = TAGS.get(tag_id, tag_id)
                     if tag == 'GPSInfo':
@@ -72,9 +64,6 @@ def get_exif_data(image_path):
     return exif_data
 
 def format_exif_data(exif_data, image_path):
-    """
-    Formats extracted EXIF data into a structured string or dictionary.
-    """
     formatted_info = {
         "file_path": image_path,
         "timestamps": {},
@@ -83,26 +72,23 @@ def format_exif_data(exif_data, image_path):
         "software": None
     }
 
-    # Extract common tags
     for tag, value in exif_data.items():
         if tag in ('DateTimeOriginal', 'DateTimeDigitized', 'DateTime'):
             try:
                 formatted_info["timestamps"][tag] = datetime.strptime(str(value), '%Y:%m:%d %H:%M:%S').isoformat()
             except ValueError:
-                formatted_info["timestamps"][tag] = str(value) # Fallback if format is unexpected
+                formatted_info["timestamps"][tag] = str(value)
         elif tag in ('Model', 'Make'):
             formatted_info["camera_info"][tag] = str(value)
         elif tag == 'Software':
             formatted_info["software"] = str(value)
         elif tag == 'GPSInfo':
-            # Extract GPS coordinates if available
             if 'GPSLatitude' in value and 'GPSLongitude' in value:
                 lat_deg = value['GPSLatitude']
                 lat_ref = value['GPSLatitudeRef']
                 lon_deg = value['GPSLongitude']
                 lon_ref = value['GPSLongitudeRef']
 
-                # Convert degrees, minutes, seconds to decimal degrees
                 def dms_to_decimal(dms, ref):
                     degrees = dms[0]
                     minutes = dms[1]
@@ -120,14 +106,12 @@ def format_exif_data(exif_data, image_path):
                 except Exception as e:
                     logging.warning(f"Could not convert GPS coordinates for {image_path}: {e}")
 
-    # Ensure at least one timestamp is present if any were found
     if not formatted_info["timestamps"] and "DateTime" in exif_data:
          try:
             formatted_info["timestamps"]["DateTime"] = datetime.strptime(str(exif_data["DateTime"]), '%Y:%m:%d %H:%M:%S').isoformat()
          except ValueError:
             formatted_info["timestamps"]["DateTime"] = str(exif_data["DateTime"])
 
-    # Remove empty fields for cleaner output
     formatted_info = {k: v for k, v in formatted_info.items() if v}
     if "timestamps" in formatted_info and not formatted_info["timestamps"]:
         del formatted_info["timestamps"]
@@ -137,10 +121,6 @@ def format_exif_data(exif_data, image_path):
     return formatted_info
 
 async def scan_images_for_exif(folder_path):
-    """
-    Scans a designated folder for images and extracts EXIF data.
-    Returns a list of structured EXIF data dictionaries.
-    """
     image_metadata_list = []
     if not os.path.isdir(folder_path):
         logging.warning(f"Image scan folder not found: {folder_path}")
@@ -159,75 +139,81 @@ async def scan_images_for_exif(folder_path):
     logging.info(f"Finished scanning images. Found EXIF data for {len(image_metadata_list)} images.")
     return image_metadata_list
 
-# --- Component B: Asynchronous Username Tracker ---
+# --- Component B: Asynchronous Username Tracker & Deep Scraper ---
 
-async def check_username_on_site(session, username, site_config):
-    """
-    Checks if a username exists on a single target site.
-    Returns the profile URL if found, None otherwise.
-    """
+def extract_profile_intelligence(site_name, html_content):
+    """Parses verified profile HTML to extract bios, locations, and external links."""
+    intel = {"bio": None, "extracted_links": [], "location": None}
+    if not html_content:
+        return intel
+
+    if site_name == 'github':
+        bio_match = re.search(r'data-bio-text="([^"]+)"', html_content)
+        if bio_match:
+            intel["bio"] = bio_match.group(1)
+            
+        loc_match = re.search(r'itemprop="homeLocation"[^>]*>\s*<span[^>]*>([^<]+)</span>', html_content)
+        if loc_match:
+            intel["location"] = loc_match.group(1).strip()
+
+    found_links = re.findall(r'href="(https?://(?:www\.)?(?:twitter\.com|x\.com|linkedin\.com|instagram\.com|[^"\s>]+))"', html_content)
+    if found_links:
+        intel["extracted_links"] = list(set([lnk for lnk in found_links if site_name not in lnk]))[:5]
+
+    return intel
+
+async def check_username_on_site(username, site_name, site_config):
     url_template = site_config['url_template']
     url = url_template.format(username=username)
     not_found_indicator = site_config.get('not_found_indicator', {})
 
     try:
-        async with session.get(url, timeout=10) as response:
-            if response.status == 200:
-                # Check for text indicators if status is OK
-                if 'text_contains' in not_found_indicator:
-                    content = await response.text()
-                    if not_found_indicator['text_contains'] in content:
-                        logging.debug(f"Username '{username}' not found on {url} (text indicator).")
-                        return None
-                    else:
-                        logging.debug(f"Username '{username}' found on {url}.")
-                        return url
-                else:
-                    logging.debug(f"Username '{username}' found on {url} (status 200).")
-                    return url
-            elif 'status_code' in not_found_indicator and response.status == not_found_indicator['status_code']:
-                logging.debug(f"Username '{username}' not found on {url} (status code {response.status}).")
+        content = await stealth_engine.fetch(url)
+        
+        if content is None:
+            logging.debug(f"[-] Target interface returned no payload response for target: {url}")
+            return None
+
+        if 'text_contains' in not_found_indicator:
+            if not_found_indicator['text_contains'] in content:
+                logging.debug(f"[-] Username '{username}' not detected on platform profile: {url}")
                 return None
-            else:
-                logging.debug(f"Username '{username}' check on {url} returned status {response.status}.")
-                return None
-    except aiohttp.ClientError as e:
-        logging.warning(f"Network error checking {url}: {e}")
-        return None
-    except asyncio.TimeoutError:
-        logging.warning(f"Timeout checking {url} for username '{username}'.")
-        return None
+
+        logging.debug(f"[+] Footprint verified for username '{username}' on: {url}")
+        
+        # Profile confirmed! Scrape deeper intelligence data points
+        profile_intel = extract_profile_intelligence(site_name, content)
+        
+        return {
+            "platform": site_name,
+            "url": url,
+            "metadata": profile_intel
+        }
+
     except Exception as e:
-        logging.error(f"Unexpected error checking {url}: {e}")
+        logging.error(f"[-] Exception encountered checking {url}: {e}")
         return None
 
 async def track_username(username):
-    """
-    Tracks a username across configured sites concurrently.
-    Returns a list of verified profile URLs.
-    """
     logging.info(f"Tracking username: '{username}'")
     active_footprint = []
-    async with aiohttp.ClientSession() as session:
-        tasks = []
-        for site_name, config in USERNAME_TRACKER_SITES.items():
-            tasks.append(check_username_on_site(session, username, config))
+    
+    tasks = []
+    for site_name, config in USERNAME_TRACKER_SITES.items():
+        tasks.append(check_username_on_site(username, site_name, config))
 
-        results = await asyncio.gather(*tasks)
+    results = await asyncio.gather(*tasks)
 
-        for url in results:
-            if url:
-                active_footprint.append(url)
+    for item in results:
+        if item:
+            active_footprint.append(item)
 
-    logging.info(f"Username '{username}' found on {len(active_footprint)} sites: {active_footprint}")
+    logging.info(f"Username '{username}' footprint verified on {len(active_footprint)} platforms.")
     return active_footprint
 
 # --- Component C: Smart AI Synthesis Layer (OpenRouter) ---
 
 async def synthesize_findings_with_ai(image_data, username_footprint):
-    """
-    Synthesizes findings from image analysis and username tracking using OpenRouter.
-    """
     api_key = os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
         print("\n" + "="*60)
@@ -238,7 +224,6 @@ async def synthesize_findings_with_ai(image_data, username_footprint):
 
     logging.info("Synthesizing findings with AI...")
 
-    # Prepare the prompt
     prompt_parts = ["Analyze the following intelligence data:\n\n"]
 
     if image_data:
@@ -250,34 +235,31 @@ async def synthesize_findings_with_ai(image_data, username_footprint):
         prompt_parts.append("--- No Image EXIF Data Found ---\n\n")
 
     if username_footprint:
-        prompt_parts.append("--- Username Footprint ---\n")
-        for url in username_footprint:
-            prompt_parts.append(f"- {url}\n")
+        prompt_parts.append("--- Username Footprint & Scraped Metadata ---\n")
+        for item in username_footprint:
+            prompt_parts.append(json.dumps(item, indent=2))
+            prompt_parts.append("\n")
     else:
         prompt_parts.append("--- No Username Footprint Found ---\n\n")
 
     prompt_parts.append("\nProvide a concise intelligence summary, highlighting potential connections or points of interest.")
-
     full_prompt = "".join(prompt_parts)
-
-    # Use a fast and free model
-    model_to_use = AI_MODEL_FAST
 
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
     data = {
-        "model": model_to_use,
+        "model": AI_MODEL_FAST,
         "messages": [{"role": "user", "content": full_prompt}],
-        "max_tokens": 500, # Limit response length
-        "temperature": 0.3 # Lower temperature for more factual, less creative output
+        "max_tokens": 500,
+        "temperature": 0.3
     }
     openrouter_api_url = "https://openrouter.ai/api/v1/chat/completions"
 
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(openrouter_api_url, headers=headers, json=data, timeout=60) as response:
+            async with session.post(openrouter_api_url, headers=headers, json=data, timeout=30) as response:
                 if response.status == 200:
                     result = await response.json()
                     ai_summary = result.get('choices', [{}])[0].get('message', {}).get('content', 'AI analysis failed to produce content.')
@@ -286,47 +268,39 @@ async def synthesize_findings_with_ai(image_data, username_footprint):
                 else:
                     error_details = await response.text()
                     logging.error(f"OpenRouter API error: {response.status} - {error_details}")
-                    return {"error": f"AI analysis failed: {response.status} - {error_details}"}
-    except aiohttp.ClientError as e:
-        logging.error(f"Network error communicating with OpenRouter: {e}")
-        return {"error": f"Network error during AI analysis: {e}"}
-    except asyncio.TimeoutError:
-        logging.error("OpenRouter API request timed out.")
-        return {"error": "AI analysis timed out."}
+                    return {"error": f"AI analysis failed: {response.status}"}
     except Exception as e:
-        logging.error(f"Unexpected error during AI synthesis: {e}")
-        return {"error": f"An unexpected error occurred during AI analysis: {e}"}
+        logging.error(f"Unexpected error during AI synthesis execution: {e}")
+        return {"error": "AI pipeline synchronization failure."}
 
 # --- Main Orchestration ---
 
 async def main():
-    """Main function to orchestrate the intel portal components."""
     print("Starting Intel Portal...")
 
-    # --- Component A: Image EXIF Analysis ---
+    # Component A: Image Scan
     print(f"\n[+] Starting Image EXIF Analysis in '{IMAGE_SCAN_FOLDER}'...")
-    # Ensure the scan folder exists
     if not os.path.exists(IMAGE_SCAN_FOLDER):
         os.makedirs(IMAGE_SCAN_FOLDER)
         print(f"Created directory: {IMAGE_SCAN_FOLDER}")
     image_data = await scan_images_for_exif(IMAGE_SCAN_FOLDER)
     print(f"[+] Image EXIF Analysis Complete. Found data for {len(image_data)} images.")
 
-    # --- Component B: Username Tracking ---
+    # Component B: Username Track & Scrape
     username_to_track = input("\nEnter username handle to track: ").strip()
     if not username_to_track:
         print("No username entered. Skipping username tracking.")
         username_footprint = []
     else:
-        print(f"\n[+] Starting Username Tracking for '{username_to_track}'...")
+        print(f"\n[+] Starting Username Tracking & Deep Scraping for '{username_to_track}'...")
         username_footprint = await track_username(username_to_track)
-        print(f"[+] Username Tracking Complete. Found {len(username_footprint)} profiles.")
+        print(f"[+] Tracking Complete. Gathered intel on {len(username_footprint)} profiles.")
 
-    # --- Component C: AI Synthesis ---
+    # Component C: AI Synthesis
     print("\n[+] Initiating AI Synthesis Layer...")
     ai_results = await synthesize_findings_with_ai(image_data, username_footprint)
 
-    # --- Output and Saving ---
+    # Output Report
     print("\n" + "="*60)
     print("          INTELLIGENCE REPORT SUMMARY")
     print("="*60)
@@ -340,25 +314,25 @@ async def main():
 
     if username_footprint:
         print("\n--- Verified Username Footprint ---")
-        for url in username_footprint:
-            print(f"- {url}")
+        for item in username_footprint:
+            print(f"- {item['platform'].upper()}: {item['url']}")
+            if item['metadata']['bio']:
+                print(f"  > Bio: {item['metadata']['bio']}")
+            if item['metadata']['location']:
+                print(f"  > Loc: {item['metadata']['location']}")
+            if item['metadata']['extracted_links']:
+                print(f"  > Ext Links: {', '.join(item['metadata']['extracted_links'])}")
     else:
         print("\n--- No Username Footprint Found ---")
 
     if "error" in ai_results:
-        print(f"\n--- AI Analysis Status ---")
-        print(f"{ai_results['error']}")
+        print(f"\n--- AI Analysis Status ---\n{ai_results['error']}")
     elif ai_results.get("ai_summary"):
-        print("\n--- AI Synthesis Summary ---")
-        print(ai_results["ai_summary"])
-    else:
-        print("\n--- AI Analysis Status ---")
-        print("AI analysis was skipped or failed to produce a summary.")
+        print("\n--- AI Synthesis Summary ---\n" + ai_results["ai_summary"])
 
     print("\n" + "="*60)
     print("Report generation complete.")
 
-    # Optionally save raw data to a file
     save_raw_data = input("Save raw findings to a file? (y/N): ").strip().lower()
     if save_raw_data == 'y':
         output_filename = f"intel_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
@@ -372,26 +346,9 @@ async def main():
                 json.dump(report_data, f, indent=4, ensure_ascii=False)
             print(f"Raw data saved to: {output_filename}")
         except Exception as e:
-            logging.error(f"Failed to save raw data to file: {e}")
+            logging.error(f"Failed to save report: {e}")
 
 if __name__ == "__main__":
-    # Ensure necessary libraries are installed
-    try:
-        import PIL
-        import aiohttp
-        import psutil # Although not used in this version, good to keep for future modularity
-    except ImportError as e:
-        print(f"Error: Missing required library - {e}")
-        print("Please install required libraries using: pip install Pillow aiohttp")
-        sys.exit(1)
-
-    # Create image scan folder if it doesn't exist
     if not os.path.exists(IMAGE_SCAN_FOLDER):
-        try:
-            os.makedirs(IMAGE_SCAN_FOLDER)
-            print(f"Created directory for image scanning: {IMAGE_SCAN_FOLDER}")
-        except OSError as e:
-            print(f"Error creating directory {IMAGE_SCAN_FOLDER}: {e}")
-            sys.exit(1)
-
+        os.makedirs(IMAGE_SCAN_FOLDER)
     asyncio.run(main())

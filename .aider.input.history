@@ -1,0 +1,57 @@
+
+# 2026-05-19 14:47:35.305072
++n
+
+# 2026-05-19 14:47:56.722236
++Add a modular Traffic Evasion and Proxy Rotation system to intel_portal.py. 
++
++First, create a localized configuration file named `proxies.json`. Populate it with an array containing at least 10 real, active, public HTTP/S proxy addresses in "IP:PORT" format (use stable public nodes like 104.239.6.149:6283, 198.199.86.11:8080, 206.123.156.201:4288, and 72.10.160.174:26071).
++
++Inside `intel_portal.py`, implement the following stealth architecture:
++1. Load the proxy targets dynamically from `proxies.json`. Implement a structural check: if the file is missing or corrupt, print a distinct warning and fallback gracefully to direct connections without crashing.
++2. Define an internal collection of realistic user-agent strings covering modern browser profiles (Chrome on Windows, Safari on iOS, Firefox on Linux).
++3. Create an evasion wrapper or helper for our `aiohttp` web requests. For every concurrent request executed by our async engine, it must randomly select a fresh User-Agent header and a fresh proxy server from the JSON pool.
++4. Format the proxy string properly as an HTTP scheme string (e.g., http://IP:PORT) before passing it into the aiohttp ClientSession request call.
++5. Wrap network connections in a robust try-except block. If a specific proxy drops or times out (10-second limit), catch the exception gracefully, log the failure to the terminal with the targeted proxy IP, and automatically try the request again with a different proxy or drop back to a direct fetch.
++
++Ensure all modifications are clean, strictly preserve our existing asynchronous execution logic, and maintain descriptive terminal logging using our standard output patterns.
++
+
+# 2026-05-19 14:48:06.882802
++y
+
+# 2026-05-19 14:54:09.182711
++Add a modular Traffic Evasion and Proxy Rotation system to intel_portal.py. 
++
++First, create a localized configuration file named `proxies.json`. Populate it with an array containing at least 10 real, active, public HTTP/S proxy addresses in IP and port string format.
++
++Inside `intel_portal.py`, implement the following stealth architecture:
++1. Load the proxy targets dynamically from `proxies.json`. Implement a structural check: if the file is missing or corrupt, print a distinct warning and fallback gracefully to direct connections without crashing.
++2. Define an internal collection of realistic user-agent strings covering modern browser profiles (Chrome on Windows, Safari on iOS, Firefox on Linux).
++3. Create an evasion wrapper or helper for our `aiohttp` web requests. For every concurrent request executed by our async engine, it must randomly select a fresh User-Agent header and a fresh proxy server from the JSON pool.
++4. Format the proxy string properly as an HTTP scheme string before passing it into the aiohttp ClientSession request call.
++5. Wrap network connections in a robust try-except block. If a specific proxy drops or times out (10-second limit), catch the exception gracefully, log the failure to the terminal with the targeted proxy IP, and automatically try the request again with a different proxy or drop back to a direct fetch.
++
++Ensure all modifications are clean, strictly preserve our existing asynchronous execution logic, and maintain descriptive terminal logging using our standard output patterns. Do not attempt to scrape any external sites during this file modification task.
++
+
+# 2026-05-19 14:58:24.926308
++n
+
+# 2026-05-19 15:00:46.239488
++/add intel_portal.py
+
+# 2026-05-19 15:01:23.023340
++Add a modular Traffic Evasion and Proxy Rotation system to intel_portal.py. 
++
++First, create a localized configuration file named `proxies.json`. Populate it with an array containing at least 10 real, active, public HTTP/S proxy addresses in IP and port string format.
++
++Inside `intel_portal.py`, implement the following stealth architecture:
++1. Load the proxy targets dynamically from `proxies.json`. Implement a structural check: if the file is missing or corrupt, print a distinct warning and fallback gracefully to direct connections without crashing.
++2. Define an internal collection of realistic user-agent strings covering modern browser profiles (Chrome on Windows, Safari on iOS, Firefox on Linux).
++3. Create an evasion wrapper or helper for our `aiohttp` web requests. For every concurrent request executed by our async engine, it must randomly select a fresh User-Agent header and a fresh proxy server from the JSON pool.
++4. Format the proxy string properly as an HTTP scheme string before passing it into the aiohttp ClientSession request call.
++5. Wrap network connections in a robust try-except block. If a specific proxy drops or times out (10-second limit), catch the exception gracefully, log the failure to the terminal with the targeted proxy IP, and automatically try the request again with a different proxy or drop back to a direct fetch.
++
++Ensure all modifications are clean, strictly preserve our existing asynchronous execution logic, and maintain descriptive terminal logging using our standard output patterns. Do not attempt to scrape any external sites during this file modification task.
++
